@@ -47,24 +47,6 @@ class LazyBioArray:
     Supports integer and slice indexing along with the `__array__()` protocol
     for seamless numpy integration.
 
-    Parameters
-    ----------
-    biofile : BioFile
-        BioFile instance to read from. Must remain open during use.
-
-    Attributes
-    ----------
-    shape : tuple[int, ...]
-        Array shape in (T, C, Z, Y, X) or (T, C, Z, Y, X, rgb) format
-    dtype : np.dtype
-        Data type of array elements
-    ndim : int
-        Number of dimensions (5 for grayscale, 6 for RGB)
-    size : int
-        Number of elements in the array
-    nbytes : int
-        Total bytes consumed by the array elements
-
     Examples
     --------
     >>> with BioFile("image.nd2") as bf:

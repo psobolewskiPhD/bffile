@@ -33,6 +33,18 @@ with BioFile("image.nd2") as bf:
     data = np.asarray(plane)  # call np.asarray to read the data into memory
 ```
 
+For info on extracting data, see:
+
+- [The `LazyBioArray` API](#reading-data-with-lazybioarray) for reading pixel
+  data with lazy loading and sub-region slicing.
+- [Using as a zarr store](#complete-virtual-ome-zarr-view) for interoperability
+  with the OME-Zarr ecosystem without file conversion.
+- [Using dask for lazy computation](#lazy-computation-with-dask) for wrapping
+  the lazy array in a dask array for parallelized computations.
+- [Presenting as an xarray
+  DataArray](#labeled-dimensionscoordinates-with-xarray) which makes it easy to
+  work with labeled dimensions and coordinates parsed from the OME metadata.
+
 ## Opening Files with BioFile
 
 [`BioFile`][bffile.BioFile] manages the lifecycle of the underlying Java reader and the
@@ -301,7 +313,96 @@ max_proj = np.max(arr, axis=2)      # z-projection (reads all data)
     Always use it inside the `with` block (or between explicit
     `open()`/`close()` calls).
 
-## Using Dask for Lazy Computation
+## Third-party array types
+
+We support casting `LazyBioArray` to various third-party array types
+for interoperability with their ecosystems:
+
+- [`to_xarray()`][bffile.BioFile.to_xarray] → [`xarray.DataArray`](https://docs.xarray.dev/en/stable/user-guide/data-structures.html#dataarray)
+- [`to_zarr_store()`][bffile.BioFile.to_zarr_store] → [`zarr.abc.store.Store`](https://zarr.readthedocs.io/en/v3.1.2/user-guide/storage.html)
+- [`to_dask()`](#using-dask-for-lazy-computation) → [`dask.array.Array`](https://docs.dask.org/en/stable/array.html)
+
+You will find each of these methods on
+
+- `BioFile`: where you can specify `series` and `resolution` as arguments
+- `Series`: where the `series` argument is pre-filled, and you can specify `resolution` if needed.
+- `LazyBioArray`: where the returned object shares the same lazy view onto the data.
+
+### Labeled dimensions/coordinates with `xarray`
+
+[`xarray`](https://docs.xarray.dev/en/stable/) provides a powerful data
+structure for working with labeled, multi-dimensional arrays.  Bioforamts data
+is naturally represented as an `xarray.DataArray` with dimensions (`"T", "C",
+"Z", "Y", "X"`, and sometimes `"S"` for RGB)`.  Metadata is parsed and used to
+populate the`.dims` and `.coords` attributes.  As you index into the array, the
+lazy reading behavior is preserved, so you can explore large datasets without
+loading everything into memory.  Semantics for coords are as follows:
+
+- `T`: `delta_t` coordinate taken from OME `pixels.planes`
+- `C`: Channel names from OME `pixels.channels` (e.g. "DAPI", "FITC", etc...)
+- `Z`: `delta_z` coordinate taken from OME `pixels.planes`
+- `Z`, `Y`, `X`: physical pixel sizes from OME `pixels.physical_size_...`
+- `S`: RGB/RGBA channels, if applicable.
+
+```python
+with BioFile("image.nd2") as bf:
+    xarr = bf.to_xarray(series=0)  # xarray.DataArray with dims and coords
+    print(xarr.dims)       # ('T', 'C', 'Z', 'Y', 'X')
+    print(xarr.coords)     # coordinates parsed from OME metadata
+
+    # indexing still creates lazy views
+    plane_view = xarr[0, 0, 2]  # xarray.DataArray view of a single plane
+    assert "T" not in plane_view.dims  # dimension is squeezed out by integer indexing
+
+    # you can also use named indexing with .sel and .isel
+    plane_view = xarr.isel(T=0, C=0, Z=2)  # same plane view using named indexing
+    red_channel = xarr.sel(C="Widefield Red")  # select by channel name (if available)
+
+    # the full ome-types.OME metadata is available in the .attrs of the DataArray
+    ome = xarr.attrs["ome_metadata"]
+```
+
+### Complete virtual OME-Zarr view
+
+The [`to_zarr_store()`][bffile.BioFile.to_zarr_store] method returns a
+`zarr.Store` that can be passed to `zarr.open()`.   When you cast a
+complete `BioFile` to a zarr store, without specifying a series or resolution,
+__the returned store provides a virtual view of the entire file as a spec compliant
+OME-Zarr__, (similar to what you would get if you converted the file to
+using [`bioformats2raw`](https://github.com/glencoesoftware/bioformats2raw), but
+without requiring any conversion or additional disk space).
+
+Groups follow the [`bioformats2raw.layout` transitional
+spec](https://ngff.openmicroscopy.org/specifications/0.5/index.html#bioformats2raw-layout-transitional)
+
+!!! warning "It's not 'free'"
+    While viewing any bioformats-supported file as an OME-Zarr without conversion is
+    a powerful feature: you should _not_ assume that you will get the anywhere near
+    same performance as a native OME-Zarr directory store. Performance will depend
+    entirely on the native file structure, and many will not be as optimized for
+    chunked access as a purpose-built, rechunked and compressed OME-Zarr.
+
+    _This pattern is intended for quick interoperability and convenience,
+    not for high performance._
+
+```python
+from bffile import open_ome_zarr_group
+import zarr
+
+ome_zarr = open_ome_zarr_group("image.nd2")
+assert isinstance(ome_zarr, zarr.Group)
+
+ome_meta = ome_zarr.attrs["ome"]
+assert "bioformats2raw.layout" in ome_meta
+
+series0 = ome_zarr["0"]  # group for series 0
+assert "multiscales" in series0.attrs["ome"]  # multiscales metadata is present
+level0 = series0["0"]    # array for resolution level 0
+assert isinstance(level0, zarr.Array)
+print(level0.shape, level0.dtype)
+```
+
+### Lazy computation with `dask`
 
 For computations over large datasets, [`BioFile.to_dask`][bffile.BioFile.to_dask]
 wraps `LazyBioArray` in a dask array:

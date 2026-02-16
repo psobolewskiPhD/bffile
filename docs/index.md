@@ -10,17 +10,38 @@ title: Get started
 It exposes the full power of Bio-Formats in a clean Pythonic API
 backed by lazy data access.
 
-**No special environment setup is required**, thanks to
-[`scyjava`](https://github.com/scijava/scyjava),
-[`jgo`](https://github.com/apposed/jgo),
-[`jpype`](https://github.com/jpype-project/jpype), and
-[`cjdk`](https://github.com/cachedjdk/cjdk):  
-just `pip install bffile` and you're ready to go.
+### Features
+
+- [Full lazy indexing and slicing](./usage.md#reading-data-with-lazybioarray)
+  (with no additional dependencis on dask/xarray/zarr) with
+  [`bffile.LazyBioArray`][]
+- [Custom zarr store](./usage.md#complete-virtual-ome-zarr-view) presents files
+  as complete multi-resolution OME-Zarr group
+- [Export to xarray
+  DataArray](./usage.md#labeled-dimensionscoordinates-with-xarray)  with
+  metadata-aware dimension and coordinate labels
+- [Export to Dask arrays](./usage.md#lazy-computation-with-dask) for parallel
+  and out-of-core computation
+
+!!! tip "Batteries included"
+    **No special environment setup is required**, thanks to
+    [`scyjava`](https://github.com/scijava/scyjava),
+    [`jgo`](https://github.com/apposed/jgo),
+    [`jpype`](https://github.com/jpype-project/jpype), and
+    [`cjdk`](https://github.com/cachedjdk/cjdk):
+
+    just `pip install bffile` and you're ready to go.
 
 ## Installation
 
 ```bash
 pip install bffile
+```
+
+Optional extras for zarr, xarray, and dask support, include:
+
+```bash
+pip install bffile[zarr,xarray,dask]
 ```
 
 ## Quick start

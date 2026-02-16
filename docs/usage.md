@@ -338,9 +338,8 @@ populate the `.dims` and `.coords` attributes.  As you index into the array, the
 lazy reading behavior is preserved, so you can explore large datasets without
 loading everything into memory.  Semantics for coords are as follows:
 
-- `T`: `delta_t` coordinate taken from OME `pixels.planes`
+- `T`: `delta_t` timestamps taken from OME `pixels.planes`
 - `C`: Channel names from OME `pixels.channels` (e.g. "DAPI", "FITC", etc...)
-- `Z`: `delta_z` coordinate taken from OME `pixels.planes`
 - `Z`, `Y`, `X`: physical pixel sizes from OME `pixels.physical_size_...`
 - `S`: RGB/RGBA channels, if applicable.
 

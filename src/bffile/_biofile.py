@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Any, ClassVar, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, overload
 
 import jpype
 import numpy as np
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from bffile._lazy_array import LazyBioArray
     from bffile._zarr import BFOmeZarrStore
+    from bffile._zarr._array_store import BFArrayStore
 
 
 @dataclass(frozen=True)
@@ -171,33 +172,6 @@ class BioFile(Sequence[Series]):
         self._cached_ome_meta: OME | None = None
         self._finalizer: weakref.finalize | None = None
         self._suspended: bool = False
-
-    def _ensure_java_reader(self) -> IFormatReader:
-        """Return the native reader, raising if not open."""
-        if self._java_reader is None:
-            raise RuntimeError("File not open - call open() first")
-        return self._java_reader
-
-    def _get_core_metadata(self, reader: IFormatReader) -> list[list[CoreMetadata]]:
-        """Parse flat CoreMetadata list into 2D structure.
-
-        Bio-Formats returns metadata as a flat list where entries are organized
-        as: [series0_res0, series0_res1, ..., series1_res0, series1_res1, ...].
-        The first entry of each series has resolution_count set to indicate how
-        many resolution levels that series has.
-        """
-        # Cache metadata in 2D structure: list[series][resolution]
-        # Bio-Formats returns a flat list where the first entry of each
-        # series has resolutionCount set. We parse this into 2D.
-        flat_list = [CoreMetadata.from_java(x) for x in reader.getCoreMetadataList()]
-
-        result: list[list[CoreMetadata]] = []
-        i = 0
-        while i < len(flat_list):
-            resolution_count = flat_list[i].resolution_count
-            result.append(flat_list[i : i + resolution_count])
-            i += resolution_count
-        return result
 
     def core_metadata(self, series: int = 0, resolution: int = 0) -> CoreMetadata:
         """Get metadata for specified series and resolution.
@@ -463,11 +437,28 @@ class BioFile(Sequence[Series]):
 
         return LazyBioArray(self, series, resolution)
 
-    def as_zarr_group(
+    @overload
+    def to_zarr_store(
         self,
+        series: Literal[None] = ...,
+        *,
+        tile_size: tuple[int, int] | None = ...,
+    ) -> BFOmeZarrStore: ...
+    @overload
+    def to_zarr_store(
+        self,
+        series: int,
+        resolution: int = ...,
+        *,
+        tile_size: tuple[int, int] | None = ...,
+    ) -> BFArrayStore: ...
+    def to_zarr_store(
+        self,
+        series: int | None = None,
+        resolution: int = 0,
         *,
         tile_size: tuple[int, int] | None = None,
-    ) -> BFOmeZarrStore:
+    ) -> BFOmeZarrStore | BFArrayStore:
         """Return a zarr v3 group store containing all series and resolutions.
 
         Creates an OME-ZARR group structure following NGFF v0.5 specification,
@@ -491,6 +482,13 @@ class BioFile(Sequence[Series]):
 
         Parameters
         ----------
+        series : int, optional
+            If provided, only return the specified series and resolution as a single
+            array store. By default, returns the full group store with all series and
+            resolutions.
+        resolution : int, optional
+            Resolution level (0 = full resolution), by default 0. Only used if `series`
+            is specified.
         tile_size : tuple[int, int], optional
             If provided, Y and X are chunked into tiles of this size instead of
             full planes. Chunk shape becomes ``(1, 1, 1, tile_y, tile_x)``.
@@ -506,7 +504,7 @@ class BioFile(Sequence[Series]):
 
         >>> import zarr
         >>> with BioFile("image.nd2") as bf:
-        ...     group = zarr.open_group(bf.as_zarr_group(), mode="r")
+        ...     group = zarr.open_group(bf.to_zarr_store(), mode="r")
         ...     # Access first series, full resolution
         ...     arr = group["0/0"]
         ...     data = arr[0, 0, 0]
@@ -515,31 +513,35 @@ class BioFile(Sequence[Series]):
         ...     print(group["0"].attrs["ome"]["multiscales"])
         ...
         ...     # Save to disk
-        ...     bf.as_zarr_group().save("output.ome.zarr")
+        ...     bf.to_zarr_store().save("output.ome.zarr")
 
         Notes
         -----
-        - BioFile must remain open while using the store
-        - For single array access, prefer `as_array().zarr_store()` (simpler)
+        - For single array access, prefer `as_array().to_zarr_store()` (simpler)
         - This creates the full hierarchy needed for multi-series/multi-resolution
           visualization tools
         - Conforms to NGFF v0.5 specification
         """
-        from bffile._zarr._group_store import BFOmeZarrStore
+        if series is None:
+            from bffile._zarr._group_store import BFOmeZarrStore
 
-        return BFOmeZarrStore(self, tile_size=tile_size)
+            return BFOmeZarrStore(self, tile_size=tile_size)
+
+        lazy = self.as_array(series=series, resolution=resolution)
+        return lazy.to_zarr_store(tile_size=tile_size)
 
     def to_dask(
         self,
         series: int = 0,
         resolution: int = 0,
+        *,
         chunks: str | tuple = "auto",
         tile_size: tuple[int, int] | str | None = None,
     ) -> dask.array.Array:
         """Create dask array for lazy computation on Bio-Formats data.
 
         Returns a dask array in TCZYX[r] order that wraps a
-        [`LazyBioArray`][bffile.LazyBioArray]. Uses single-threaded scheduler by default
+        [`LazyBioArray`][bffile.LazyBioArray]. Uses single-threaded scheduler
         for Bio-Formats thread safety.
 
         Parameters
@@ -582,74 +584,25 @@ class BioFile(Sequence[Series]):
         - BioFile must remain open during computation
         - Uses synchronous scheduler by default (required for thread safety)
         """
-        try:
-            import dask.array as da
-        except ImportError as e:
-            raise ImportError(
-                "Dask is required for to_dask(). "
-                "Please install with `pip install bffile[dask]`"
-            ) from e
-
-        # Validate mutually exclusive parameters
-        if tile_size is not None and chunks != "auto":
-            raise ValueError(
-                "chunks and tile_size are mutually exclusive. "
-                "When using tile_size, leave chunks as 'auto' (default)."
-            )
-
-        # Compute chunks from tile_size if provided
-        if tile_size is not None:
-            # Validate tile_size format
-            if tile_size == "auto":
-                # Query Bio-Formats for optimal tile size
-                reader = self._ensure_java_reader()
-                reader.setSeries(series)
-                reader.setResolution(resolution)
-                tile_size = (
-                    reader.getOptimalTileHeight(),
-                    reader.getOptimalTileWidth(),
-                )
-            elif not (
-                isinstance(tile_size, tuple)
-                and len(tile_size) == 2
-                and all(isinstance(x, int) for x in tile_size)
-            ):
-                raise ValueError(
-                    f"tile_size must be a tuple of two integers or 'auto', "
-                    f"got {tile_size}"
-                )
-
-            # Compute chunks based on tile size
-            meta = self.core_metadata(series, resolution)
-            nt, nc, nz, ny, nx, nrgb = meta.shape
-            chunks = _utils.get_dask_tile_chunks(nt, nc, nz, ny, nx, tile_size)
-            if nrgb > 1:
-                chunks = (*chunks, nrgb)  # type: ignore[assignment]
-
         lazy_arr = self.as_array(series=series, resolution=resolution)
-        return da.from_array(lazy_arr, chunks=chunks)  # type: ignore
+        return lazy_arr.to_dask(chunks=chunks, tile_size=tile_size)
 
-    def as_xarray(
-        self,
-        series: int = 0,
-        resolution: int = 0,
-    ) -> xr.DataArray:
-        """Create xarray.DataArray with OME metadata as coordinates."""
-        try:
-            import xarray as xr
-        except ImportError as e:
-            raise ImportError(
-                "xarray is required for as_xarray(). "
-                "Install with `pip install bffile[xarray]`"
-            ) from e
+    def to_xarray(self, series: int = 0, resolution: int = 0) -> xr.DataArray:
+        """Return xarray.DataArray for specified series and resolution.
 
-        arr = self.as_array(series=series, resolution=resolution)
-        return xr.DataArray(
-            arr,
-            dims=arr.dims,
-            coords=arr.coords,
-            attrs={"ome_metadata": self.ome_metadata},
-        )
+        The returned DataArray has `.dims` and `.coords` attributes populated according
+        to the metadata. Dimension and coord names will be one of: `TCZYXS`, where `S`
+        represents the RGB/RGBA channels if present. The parsed `ome_types.OME` object
+        is also available in the `.attrs['ome_metadata']` attribute of the DataArray.
+
+        Parameters
+        ----------
+        series : int, optional
+            Series index to read from, by default 0
+        resolution : int, optional
+            Resolution level (0 = full resolution), by default 0
+        """
+        return self.as_array(series=series, resolution=resolution).to_xarray()
 
     @property
     def closed(self) -> bool:
@@ -736,17 +689,6 @@ class BioFile(Sequence[Series]):
         elif isinstance(index, slice):
             return [self._get_series(i) for i in range(*index.indices(len(self)))]
         raise TypeError(f"Invalid index type: {type(index)}")  # pragma: no cover
-
-    def _get_series(self, index: int) -> Series:
-        """Internal method to get a Series with index validation."""
-        n = len(self)  # also validates open state
-        if index < 0:
-            index += n
-        if index < 0 or index >= n:
-            raise IndexError(f"Series index {index} out of range (file has {n} series)")
-        from bffile._series import Series
-
-        return Series(self, index)
 
     def used_files(self, *, metadata_only: bool = False) -> list[str]:
         """Return complete list of files needed to open this dataset.
@@ -895,6 +837,119 @@ class BioFile(Sequence[Series]):
             return buffer
 
         return im
+
+    # ========================== static methods ==========================
+
+    @staticmethod
+    def bioformats_version() -> str:
+        """Get the version of Bio-Formats."""
+        Version = jimport("loci.formats.FormatTools")
+        return str(getattr(Version, "VERSION", "unknown"))
+
+    @staticmethod
+    def bioformats_maven_coordinate() -> str:
+        """Return the Maven coordinate used to load Bio-Formats.
+
+        This was either provided via the `BIOFORMATS_VERSION` environment variable, or
+        is the default value, in format "groupId:artifactId:version",
+        See <https://mvnrepository.com/artifact/ome> for available versions.
+        """
+        from ._java_stuff import MAVEN_COORDINATE
+
+        return MAVEN_COORDINATE
+
+    @staticmethod
+    @cache
+    def list_supported_suffixes() -> set[str]:
+        """List all file suffixes supported by the available readers."""
+        reader = jimport("loci.formats.ImageReader")()
+        return {str(x) for x in reader.getSuffixes()}
+
+    @staticmethod
+    @cache
+    def list_available_readers() -> list[ReaderInfo]:
+        """List all available Bio-Formats readers.
+
+        Returns
+        -------
+        list[ReaderInfo]
+            Information about each available reader, including:
+
+            - format: human-readable format name (e.g., "Nikon ND2")
+            - suffixes: supported file extensions (e.g., ("nd2", "jp2"))
+            - class_name: full Java class name (e.g., "ND2Reader")
+            - is_gpl: whether this reader requires GPL license (True) or is BSD (False)
+        """
+        ImageReader = jimport("loci.formats.ImageReader")
+        temp_reader = ImageReader()
+        try:
+            formats = []
+            for reader in temp_reader.getReaders():
+                reader_cls = cast("java.lang.Class", reader.getClass())  # type: ignore
+                class_name = str(reader_cls.getName()).removeprefix("loci.formats.in.")
+
+                # Detect license from JAR file name
+                # GPL readers come from formats-gpl-X.X.X.jar
+                # BSD readers come from formats-bsd-X.X.X.jar
+                is_gpl = True
+                with suppress(Exception):
+                    protection_domain = reader_cls.getProtectionDomain()
+                    if (code_source := protection_domain.getCodeSource()) is not None:
+                        location = str(code_source.getLocation())
+                        is_gpl = "formats-gpl-" in location.split("/")[-1]
+
+                formats.append(
+                    ReaderInfo(
+                        format=str(reader.getFormat()),
+                        suffixes=tuple(str(s) for s in reader.getSuffixes()),
+                        class_name=class_name,
+                        is_gpl=is_gpl,
+                    )
+                )
+
+            return formats
+        finally:
+            temp_reader.close()
+
+    # ========================== Internal methods ==========================
+
+    def _ensure_java_reader(self) -> IFormatReader:
+        """Return the native reader, raising if not open."""
+        if self._java_reader is None:
+            raise RuntimeError("File not open - call open() first")
+        return self._java_reader
+
+    def _get_core_metadata(self, reader: IFormatReader) -> list[list[CoreMetadata]]:
+        """Parse flat CoreMetadata list into 2D structure.
+
+        Bio-Formats returns metadata as a flat list where entries are organized
+        as: [series0_res0, series0_res1, ..., series1_res0, series1_res1, ...].
+        The first entry of each series has resolution_count set to indicate how
+        many resolution levels that series has.
+        """
+        # Cache metadata in 2D structure: list[series][resolution]
+        # Bio-Formats returns a flat list where the first entry of each
+        # series has resolutionCount set. We parse this into 2D.
+        flat_list = [CoreMetadata.from_java(x) for x in reader.getCoreMetadataList()]
+
+        result: list[list[CoreMetadata]] = []
+        i = 0
+        while i < len(flat_list):
+            resolution_count = flat_list[i].resolution_count
+            result.append(flat_list[i : i + resolution_count])
+            i += resolution_count
+        return result
+
+    def _get_series(self, index: int) -> Series:
+        """Internal method to get a Series with index validation."""
+        n = len(self)  # also validates open state
+        if index < 0:
+            index += n
+        if index < 0 or index >= n:
+            raise IndexError(f"Series index {index} out of range (file has {n} series)")
+        from bffile._series import Series
+
+        return Series(self, index)
 
     def _read_plane(
         self,
@@ -1071,77 +1126,6 @@ class BioFile(Sequence[Series]):
             cls._service = factory.getInstance(OMEXMLService)
 
         return cls._service.createOMEXMLMetadata()
-
-    @staticmethod
-    def bioformats_version() -> str:
-        """Get the version of Bio-Formats."""
-        Version = jimport("loci.formats.FormatTools")
-        return str(getattr(Version, "VERSION", "unknown"))
-
-    @staticmethod
-    def bioformats_maven_coordinate() -> str:
-        """Return the Maven coordinate used to load Bio-Formats.
-
-        This was either provided via the `BIOFORMATS_VERSION` environment variable, or
-        is the default value, in format "groupId:artifactId:version",
-        See <https://mvnrepository.com/artifact/ome> for available versions.
-        """
-        from ._java_stuff import MAVEN_COORDINATE
-
-        return MAVEN_COORDINATE
-
-    @staticmethod
-    @cache
-    def list_supported_suffixes() -> set[str]:
-        """List all file suffixes supported by the available readers."""
-        reader = jimport("loci.formats.ImageReader")()
-        return {str(x) for x in reader.getSuffixes()}
-
-    @staticmethod
-    @cache
-    def list_available_readers() -> list[ReaderInfo]:
-        """List all available Bio-Formats readers.
-
-        Returns
-        -------
-        list[ReaderInfo]
-            Information about each available reader, including:
-
-            - format: human-readable format name (e.g., "Nikon ND2")
-            - suffixes: supported file extensions (e.g., ("nd2", "jp2"))
-            - class_name: full Java class name (e.g., "ND2Reader")
-            - is_gpl: whether this reader requires GPL license (True) or is BSD (False)
-        """
-        ImageReader = jimport("loci.formats.ImageReader")
-        temp_reader = ImageReader()
-        try:
-            formats = []
-            for reader in temp_reader.getReaders():
-                reader_cls = cast("java.lang.Class", reader.getClass())  # type: ignore
-                class_name = str(reader_cls.getName()).removeprefix("loci.formats.in.")
-
-                # Detect license from JAR file name
-                # GPL readers come from formats-gpl-X.X.X.jar
-                # BSD readers come from formats-bsd-X.X.X.jar
-                is_gpl = True
-                with suppress(Exception):
-                    protection_domain = reader_cls.getProtectionDomain()
-                    if (code_source := protection_domain.getCodeSource()) is not None:
-                        location = str(code_source.getLocation())
-                        is_gpl = "formats-gpl-" in location.split("/")[-1]
-
-                formats.append(
-                    ReaderInfo(
-                        format=str(reader.getFormat()),
-                        suffixes=tuple(str(s) for s in reader.getSuffixes()),
-                        class_name=class_name,
-                        is_gpl=is_gpl,
-                    )
-                )
-
-            return formats
-        finally:
-            temp_reader.close()
 
 
 def _close_java_reader(java_reader: IFormatReader | None) -> None:

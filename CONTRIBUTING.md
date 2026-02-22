@@ -16,6 +16,14 @@ Some quick notes/tips for contributors:
 uv run pytest
 ```
 
+The first run will download test data is stored in a Cloudflare R2 bucket. 
+Afterawrds, you may neet to fetch the latest test data using
+[the fetch test data script](https://github.com/psobolewskiPhD/bffile/blob/main/scripts/fetch_test_data.py):
+
+```sh
+uv run python scripts/fetch_test_data.py
+```
+
 Note: To use an isolated [jgo](https://github.com/apposed/jgo) cache directory,
 pass `--no-jgo-cache` to the test command. This will force jgo to resolve dependencies
 from scratch each time, without using any cached artifacts from `~/.jgo`.

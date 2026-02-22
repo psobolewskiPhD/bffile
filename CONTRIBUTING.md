@@ -16,8 +16,8 @@ Some quick notes/tips for contributors:
 uv run pytest
 ```
 
-The first run will download test data is stored in a Cloudflare R2 bucket. 
-Afterawrds, you may neet to fetch the latest test data using
+The first run will download test data from a Cloudflare R2 bucket. 
+To re-fetch the latest test data at any point, either delete `tests/data`, or use
 [the fetch test data script](https://github.com/psobolewskiPhD/bffile/blob/main/scripts/fetch_test_data.py):
 
 ```sh

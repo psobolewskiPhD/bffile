@@ -281,6 +281,9 @@ class BioFile(Sequence[Series]):
             r = jimport("loci.formats.ImageReader")()
             r.setFlattenedResolutions(False)
 
+            ChannelFiller = jimport("loci.formats.ChannelFiller")
+            r = ChannelFiller(r)
+
             if self._memoize > 0:
                 Memoizer = jimport("loci.formats.Memoizer")
                 if BIOFORMATS_MEMO_DIR is not None:

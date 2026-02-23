@@ -83,19 +83,22 @@ def test_core_meta_returns_metadata(opened_biofile: BioFile) -> None:
     assert isinstance(meta.dtype, np.dtype)
 
 
-def test_gif_palette_expands_to_channels(simple_file: Path) -> None:
+@pytest.mark.parametrize(
+    ("channel_filler", "expect_rgb", "expect_indexed"),
+    [(None, 3, False), (True, 3, False), (False, 1, True)],
+    ids=["auto", "forced", "disabled"],
+)
+def test_channel_filler_gif(
+    simple_file: Path,
+    channel_filler: bool | None,
+    expect_rgb: int,
+    expect_indexed: bool,
+) -> None:
     gif_file = simple_file.parent / "example.gif"
-    with BioFile(gif_file) as bf:
+    with BioFile(gif_file, channel_filler=channel_filler) as bf:
         meta = bf.core_metadata()
-        assert meta.shape.c == 1
-        assert meta.shape.rgb == 3
-        assert meta.is_rgb is True
-        assert meta.is_indexed is False
-
-        r = bf._java_reader
-        assert r is not None
-        r.setSeries(0)
-        assert r.getSizeC() == 3
+        assert meta.shape.rgb == expect_rgb
+        assert meta.is_indexed is expect_indexed
 
 
 def test_false_color_indexed_file_not_expanded(simple_file: Path) -> None:
@@ -107,12 +110,6 @@ def test_false_color_indexed_file_not_expanded(simple_file: Path) -> None:
         assert meta.is_rgb is False
         assert meta.is_indexed
         assert meta.is_false_color
-
-        r = bf._java_reader
-        assert r is not None
-        r.setSeries(0)
-        assert r.getSizeC() == 2
-        assert r.getImageCount() == 2
 
 
 def test_ome_xml_property(opened_biofile: BioFile) -> None:

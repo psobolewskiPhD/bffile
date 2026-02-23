@@ -89,21 +89,19 @@ def test_core_meta_returns_metadata(opened_biofile: BioFile) -> None:
     ids=["auto", "forced", "disabled"],
 )
 def test_channel_filler_gif(
-    simple_file: Path,
+    data_dir: Path,
     channel_filler: bool | None,
     expect_rgb: int,
     expect_indexed: bool,
 ) -> None:
-    gif_file = simple_file.parent / "example.gif"
-    with BioFile(gif_file, channel_filler=channel_filler) as bf:
+    with BioFile(data_dir / "example.gif", channel_filler=channel_filler) as bf:
         meta = bf.core_metadata()
         assert meta.shape.rgb == expect_rgb
         assert meta.is_indexed is expect_indexed
 
 
-def test_false_color_indexed_file_not_expanded(simple_file: Path) -> None:
-    nd2_file = simple_file.parent / "ND2_dims_c2y32x32.nd2"
-    with BioFile(nd2_file) as bf:
+def test_false_color_indexed_file_not_expanded(data_dir: Path) -> None:
+    with BioFile(data_dir / "ND2_dims_c2y32x32.nd2") as bf:
         meta = bf.core_metadata()
         assert meta.shape.c == 2
         assert meta.shape.rgb == 1
